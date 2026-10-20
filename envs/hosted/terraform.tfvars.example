@@ -1,5 +1,10 @@
 cells = {
+  # A small throwaway cell for internal testing.
   internal = {
-    shira_version = "main"
+    shira_version       = "main"
+    db_instance_class   = "db.t4g.micro"
+    fleet_instance_type = "m6i.large"
+    fleet_max_size      = 1
+    deletion_protection = false
   }
 }
