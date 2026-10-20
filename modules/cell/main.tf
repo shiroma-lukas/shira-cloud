@@ -167,20 +167,23 @@ resource "aws_cloudwatch_log_metric_filter" "egress_denied" {
 module "fleet" {
   source = "../sandbox-fleet"
 
-  name               = var.name
-  vpc_id             = var.vpc_id
-  subnet_ids         = var.private_subnet_ids
-  instance_type      = var.fleet_instance_type
-  min_size           = var.fleet_min_size
-  max_size           = var.fleet_max_size
-  max_task_minutes   = var.max_task_minutes
-  shira_repo_url     = var.shira_repo_url
-  shira_version      = var.shira_version
-  app_secret_arn     = aws_secretsmanager_secret.app.arn
-  db_secret_arn      = aws_db_instance.this.master_user_secret[0].secret_arn
-  db_address         = aws_db_instance.this.address
-  db_port            = aws_db_instance.this.port
-  config_bucket      = aws_s3_bucket.config.bucket
-  transcripts_bucket = aws_s3_bucket.transcripts.bucket
-  log_groups         = { for k, g in aws_cloudwatch_log_group.this : k => g.name }
+  name                = var.name
+  vpc_id              = var.vpc_id
+  subnet_ids          = var.private_subnet_ids
+  instance_type       = var.fleet_instance_type
+  architecture        = var.fleet_architecture
+  spot                = var.fleet_spot
+  spot_instance_types = var.fleet_spot_instance_types
+  min_size            = var.fleet_min_size
+  max_size            = var.fleet_max_size
+  max_task_minutes    = var.max_task_minutes
+  shira_repo_url      = var.shira_repo_url
+  shira_version       = var.shira_version
+  app_secret_arn      = aws_secretsmanager_secret.app.arn
+  db_secret_arn       = aws_db_instance.this.master_user_secret[0].secret_arn
+  db_address          = aws_db_instance.this.address
+  db_port             = aws_db_instance.this.port
+  config_bucket       = aws_s3_bucket.config.bucket
+  transcripts_bucket  = aws_s3_bucket.transcripts.bucket
+  log_groups          = { for k, g in aws_cloudwatch_log_group.this : k => g.name }
 }

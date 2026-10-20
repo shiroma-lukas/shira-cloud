@@ -1,10 +1,14 @@
+# The hosted environment runs test cells only for now, so it takes the cheap path:
+# a NAT instance (nat_mode defaults to "instance") and Spot Graviton hosts.
 cells = {
-  # A small throwaway cell for internal testing.
   internal = {
-    shira_version       = "main"
-    db_instance_class   = "db.t4g.micro"
-    fleet_instance_type = "m6i.large"
-    fleet_max_size      = 1
-    deletion_protection = false
+    shira_version             = "main"
+    db_instance_class         = "db.t4g.micro"
+    fleet_architecture        = "arm64"
+    fleet_instance_type       = "m7g.large"
+    fleet_spot                = true
+    fleet_spot_instance_types = ["m6g.large", "t4g.large"]
+    fleet_max_size            = 1
+    deletion_protection       = false
   }
 }

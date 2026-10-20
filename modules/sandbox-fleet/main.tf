@@ -1,8 +1,19 @@
 data "aws_region" "current" {}
 
+locals {
+  ubuntu_arch    = var.architecture == "arm64" ? "arm64" : "amd64"
+  instance_types = distinct(concat([var.instance_type], var.spot ? var.spot_instance_types : []))
+}
+
 # Ubuntu 24.04 LTS, resolved at plan time. gVisor publishes Debian/Ubuntu packages.
 data "aws_ssm_parameter" "ubuntu" {
-  name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
+  name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/${local.ubuntu_arch}/hvm/ebs-gp3/ami-id"
+}
+
+# Catch an x86 type in an arm64 fleet (or the reverse) at plan time, not at boot.
+data "aws_ec2_instance_type" "fleet" {
+  for_each      = toset(local.instance_types)
+  instance_type = each.value
 }
 
 # No inbound rules at all: hosts are reached through SSM, never SSH.
@@ -74,6 +85,15 @@ resource "aws_iam_instance_profile" "fleet" {
 }
 
 resource "aws_launch_template" "fleet" {
+  lifecycle {
+    precondition {
+      condition = alltrue([
+        for t in data.aws_ec2_instance_type.fleet : contains(t.supported_architectures, var.architecture)
+      ])
+      error_message = "Every fleet instance type must support architecture ${var.architecture}."
+    }
+  }
+
   name_prefix   = "${var.name}-fleet-"
   image_id      = data.aws_ssm_parameter.ubuntu.insecure_value
   instance_type = var.instance_type
@@ -140,10 +160,38 @@ resource "aws_autoscaling_group" "fleet" {
   min_size            = var.min_size
   max_size            = var.max_size
   health_check_type   = "EC2"
+  # With Spot, replace a host as soon as AWS signals elevated interruption risk.
+  capacity_rebalance = var.spot
 
-  launch_template {
-    id      = aws_launch_template.fleet.id
-    version = aws_launch_template.fleet.latest_version
+  dynamic "launch_template" {
+    for_each = var.spot ? [] : [1]
+    content {
+      id      = aws_launch_template.fleet.id
+      version = aws_launch_template.fleet.latest_version
+    }
+  }
+
+  dynamic "mixed_instances_policy" {
+    for_each = var.spot ? [1] : []
+    content {
+      instances_distribution {
+        on_demand_base_capacity                  = 0
+        on_demand_percentage_above_base_capacity = 0
+        spot_allocation_strategy                 = "price-capacity-optimized"
+      }
+      launch_template {
+        launch_template_specification {
+          launch_template_id = aws_launch_template.fleet.id
+          version            = aws_launch_template.fleet.latest_version
+        }
+        dynamic "override" {
+          for_each = local.instance_types
+          content {
+            instance_type = override.value
+          }
+        }
+      }
+    }
   }
 
   # Rolling replacement when the launch template changes (new shira_version, AMI, size).

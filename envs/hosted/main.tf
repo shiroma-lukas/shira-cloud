@@ -26,20 +26,24 @@ module "network" {
   source   = "../../modules/network"
   name     = "shira-hosted"
   az_count = 3
+  nat_mode = var.nat_mode
 }
 
 module "cell" {
   for_each = var.cells
   source   = "../../modules/cell"
 
-  name                = "shira-${each.key}"
-  vpc_id              = module.network.vpc_id
-  private_subnet_ids  = module.network.private_subnet_ids
-  shira_version       = each.value.shira_version
-  db_instance_class   = each.value.db_instance_class
-  db_multi_az         = each.value.db_multi_az
-  fleet_instance_type = each.value.fleet_instance_type
-  fleet_min_size      = each.value.fleet_min_size
-  fleet_max_size      = each.value.fleet_max_size
-  deletion_protection = each.value.deletion_protection
+  name                      = "shira-${each.key}"
+  vpc_id                    = module.network.vpc_id
+  private_subnet_ids        = module.network.private_subnet_ids
+  shira_version             = each.value.shira_version
+  db_instance_class         = each.value.db_instance_class
+  db_multi_az               = each.value.db_multi_az
+  fleet_instance_type       = each.value.fleet_instance_type
+  fleet_architecture        = each.value.fleet_architecture
+  fleet_spot                = each.value.fleet_spot
+  fleet_spot_instance_types = each.value.fleet_spot_instance_types
+  fleet_min_size            = each.value.fleet_min_size
+  fleet_max_size            = each.value.fleet_max_size
+  deletion_protection       = each.value.deletion_protection
 }

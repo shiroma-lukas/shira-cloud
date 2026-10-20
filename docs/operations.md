@@ -79,6 +79,20 @@ and is retried on another host.
 
 The customer can cut us off at any time by deleting the role; the cell keeps running.
 
+## Keeping costs down
+
+Every option below is opt-in per environment or cell; module defaults stay on the robust choice.
+
+| Option | Where | Effect | Trade-off |
+|---|---|---|---|
+| `nat_mode = "instance"` | network | Replaces the NAT gateway (~US$70/month fixed) with a `t4g.nano` doing NAT | One instance carries all egress; AWS auto-recovers it on host failure. Use `"gateway"` for paying customers |
+| `fleet_spot = true` + `fleet_spot_instance_types` | cell | Sandbox hosts on Spot, typically 60-70% cheaper | A reclaimed host's task is retried on another host (lease expiry). More instance types mean fewer interruptions |
+| `fleet_architecture = "arm64"` | cell | Graviton hosts, ~20% cheaper per vCPU | Instance types must be Graviton (`m7g`, `m6g`, `t4g`, ...); checked at plan time |
+| `db_instance_class = "db.t4g.micro"` | cell | Smallest Postgres | Fine for test cells; not for real load |
+| Destroy when idle | env | `terraform destroy` after a test session, `apply` before the next | Takes ~10 minutes to come back (RDS creation dominates) |
+
+`envs/hosted/terraform.tfvars.example` uses all of them for the internal test cell.
+
 ## Known gaps (M1)
 
 - Transcripts are uploaded to S3 by the sync timer, but the URIs recorded in the database

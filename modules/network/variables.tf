@@ -16,9 +16,30 @@ variable "az_count" {
 }
 
 variable "single_nat_gateway" {
-  description = "One NAT gateway for all AZs (cheaper) instead of one per AZ (survives an AZ outage)."
+  description = "With nat_mode = gateway: one NAT gateway for all AZs (cheaper) instead of one per AZ (survives an AZ outage)."
   type        = bool
   default     = true
+}
+
+variable "nat_mode" {
+  description = <<-EOT
+    How private subnets reach the internet:
+    "gateway"  - managed NAT gateway: scales and heals itself, ~US$70/month fixed in sa-east-1.
+    "instance" - one small arm64 instance doing NAT: a few dollars a month, fine for test cells
+                 and low traffic; a single point of failure until AWS auto-recovers it.
+  EOT
+  type        = string
+  default     = "gateway"
+  validation {
+    condition     = contains(["gateway", "instance"], var.nat_mode)
+    error_message = "nat_mode must be \"gateway\" or \"instance\"."
+  }
+}
+
+variable "nat_instance_type" {
+  description = "With nat_mode = instance. Must be arm64 (Graviton)."
+  type        = string
+  default     = "t4g.nano"
 }
 
 variable "flow_log_retention_days" {

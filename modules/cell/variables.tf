@@ -48,6 +48,24 @@ variable "fleet_instance_type" {
   default = "m6i.xlarge"
 }
 
+variable "fleet_architecture" {
+  description = "\"x86_64\" or \"arm64\" (Graviton). fleet_instance_type must match."
+  type        = string
+  default     = "x86_64"
+}
+
+variable "fleet_spot" {
+  description = "Run sandbox hosts on Spot. Interrupted tasks are retried on another host."
+  type        = bool
+  default     = false
+}
+
+variable "fleet_spot_instance_types" {
+  description = "With fleet_spot: alternative types (same architecture) to widen the Spot capacity pool."
+  type        = list(string)
+  default     = []
+}
+
 variable "fleet_min_size" {
   type    = number
   default = 1

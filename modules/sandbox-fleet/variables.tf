@@ -11,7 +11,34 @@ variable "subnet_ids" {
 }
 
 variable "instance_type" {
-  type = string
+  description = "Primary instance type. Must match architecture."
+  type        = string
+}
+
+variable "architecture" {
+  description = "\"x86_64\" or \"arm64\" (Graviton, ~20% cheaper per vCPU). gVisor and the worker image support both."
+  type        = string
+  default     = "x86_64"
+  validation {
+    condition     = contains(["x86_64", "arm64"], var.architecture)
+    error_message = "architecture must be \"x86_64\" or \"arm64\"."
+  }
+}
+
+variable "spot" {
+  description = <<-EOT
+    Run hosts on Spot (typically 60-70% cheaper). Safe for Shira: a reclaimed host's task
+    loses its lease and is retried on another host. Each extra type in spot_instance_types
+    widens the capacity pool, which makes interruptions rarer.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "spot_instance_types" {
+  description = "With spot: alternative instance types besides instance_type, same architecture."
+  type        = list(string)
+  default     = []
 }
 
 variable "min_size" {
