@@ -6,3 +6,6 @@
 backend.hcl
 crash.log
 .terraform.lock.hcl.bak
+# Saved plans contain resolved values (account ids, ARNs, sometimes secrets)
+*.tfplan
+tfplan
