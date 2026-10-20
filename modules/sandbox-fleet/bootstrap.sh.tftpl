@@ -1,0 +1,219 @@
+#!/bin/bash
+# Bootstraps a Shira sandbox host: Docker with gVisor, the egress proxy, and a dispatcher.
+# Rendered by Terraform (modules/sandbox-fleet). Shell variables use $name, never the
+# brace form, which Terraform would try to interpolate.
+set -euxo pipefail
+mkdir -p /var/log/shira
+exec > >(tee -a /var/log/shira/bootstrap.log) 2>&1
+
+export DEBIAN_FRONTEND=noninteractive
+
+# --- Packages ---------------------------------------------------------------------------
+apt-get update
+apt-get install -y ca-certificates curl gnupg git jq unzip docker.io
+
+curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip
+unzip -q /tmp/awscli.zip -d /tmp
+/tmp/aws/install
+
+curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
+  > /etc/apt/sources.list.d/gvisor.list
+apt-get update
+apt-get install -y runsc
+runsc install
+systemctl restart docker
+
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+apt-get install -y nodejs
+corepack enable
+
+# --- Logs to CloudWatch -----------------------------------------------------------------
+curl -fsSL https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb -o /tmp/cwa.deb
+dpkg -i /tmp/cwa.deb
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'JSON'
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          { "file_path": "/var/log/shira/dispatcher.log", "log_group_name": "${log_group_dispatch}", "log_stream_name": "{instance_id}" },
+          { "file_path": "/var/log/shira/egress.log", "log_group_name": "${log_group_egress}", "log_stream_name": "{instance_id}" },
+          { "file_path": "/var/log/shira/bootstrap.log", "log_group_name": "${log_group_bootstrap}", "log_stream_name": "{instance_id}" }
+        ]
+      }
+    }
+  }
+}
+JSON
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+# --- Shira ------------------------------------------------------------------------------
+useradd --system --create-home --shell /usr/sbin/nologin --groups docker shira
+git clone --quiet "${shira_repo_url}" /opt/shira
+git -C /opt/shira checkout --quiet "${shira_version}"
+chown -R shira:shira /opt/shira
+sudo -u shira -H env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 bash -c 'cd /opt/shira && pnpm install --frozen-lockfile && pnpm build:egress'
+
+docker build --quiet -f /opt/shira/images/egress-proxy/Dockerfile -t shira-egress-proxy /opt/shira
+docker build --quiet -f /opt/shira/images/worker/Dockerfile -t shira-worker:latest /opt/shira
+docker network inspect shira-sandbox >/dev/null 2>&1 || docker network create --internal shira-sandbox
+
+curl -fsSL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o /etc/ssl/certs/rds-global-bundle.pem
+
+install -d -o shira -g shira -m 0750 /etc/shira /etc/shira/config /etc/shira/context /var/lib/shira /var/lib/shira/transcripts
+
+# The egress admin token is local to this host: only its proxy and dispatcher share it.
+umask 077
+echo "SHIRA_EGRESS_ADMIN_TOKEN=$(openssl rand -hex 24)" > /etc/shira/egress.env
+chown root:shira /etc/shira/egress.env
+chmod 0640 /etc/shira/egress.env
+umask 022
+
+# Renders /run/shira/env and the GitHub App key from Secrets Manager. Runs as root before
+# every dispatcher start, so rotated secrets are picked up on restart.
+cat > /usr/local/bin/shira-render-env <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+umask 077
+install -d -o shira -g shira -m 0700 /run/shira
+app=$(aws secretsmanager get-secret-value --region "${region}" --secret-id "${app_secret_arn}" --query SecretString --output text)
+db=$(aws secretsmanager get-secret-value --region "${region}" --secret-id "${db_secret_arn}" --query SecretString --output text)
+user=$(jq -r '.username | @uri' <<<"$db")
+password=$(jq -r '.password | @uri' <<<"$db")
+# Single-quoted values: the wrapper sources this file, and the URL contains '&'.
+cat > /run/shira/env <<ENV
+DATABASE_URL='postgresql://$user:$password@${db_address}:${db_port}/shira?sslmode=verify-full&sslrootcert=/etc/ssl/certs/rds-global-bundle.pem'
+SHIRA_GITHUB_APP_ID='$(jq -r .github_app_id <<<"$app")'
+SHIRA_GITHUB_PRIVATE_KEY_PATH='/run/shira/github-app.pem'
+ANTHROPIC_API_KEY='$(jq -r .anthropic_api_key <<<"$app")'
+SHIRA_CONFIG='/etc/shira/config'
+SHIRA_CONTEXT_DIR='/etc/shira/context'
+SHIRA_TRANSCRIPTS_DIR='/var/lib/shira/transcripts'
+ENV
+jq -r .github_private_key <<<"$app" > /run/shira/github-app.pem
+chown shira:shira /run/shira/env /run/shira/github-app.pem
+aws secretsmanager describe-secret --region "${region}" --secret-id "${db_secret_arn}" \
+  --query 'VersionIdsToStages | keys(@) | sort(@) | join(`,`, @)' --output text > /run/shira/db-secret-version
+SCRIPT
+chmod 0755 /usr/local/bin/shira-render-env
+
+# Dispatcher wrapper: clear sandboxes a previous run left behind, migrate, then dispatch.
+# node --import tsx runs as one process, so SIGTERM reaches the dispatcher directly.
+cat > /usr/local/bin/shira-dispatcher <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+set -a
+. /run/shira/env
+. /etc/shira/egress.env
+set +a
+stale=$(docker ps --all --quiet --filter label=shira.task)
+[ -z "$stale" ] || docker rm --force $stale
+cd /opt/shira
+node --import tsx src/cli/shira.ts migrate
+exec node --import tsx src/cli/shira.ts dispatch
+SCRIPT
+chmod 0755 /usr/local/bin/shira-dispatcher
+
+# Operator CLI on the host (reached through SSM): `sudo shira list`, `sudo shira kill on`, ...
+cat > /usr/local/bin/shira <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+[ -r /run/shira/env ] || /usr/local/bin/shira-render-env
+cd /opt/shira
+exec sudo -u shira bash -c 'set -a; . /run/shira/env; set +a; exec node --import tsx src/cli/shira.ts "$@"' shira "$@"
+SCRIPT
+chmod 0755 /usr/local/bin/shira
+
+# Every 5 minutes: pull config and context, upload transcripts, and restart the dispatcher
+# (gracefully, after its current task) when config or the database password changed.
+cat > /usr/local/bin/shira-sync <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+changed=0
+for dir in config context; do
+  out=$(aws s3 sync "s3://${config_bucket}/$dir" "/etc/shira/$dir" --delete --no-progress --region "${region}")
+  [ -z "$out" ] || changed=1
+done
+aws s3 sync /var/lib/shira/transcripts "s3://${transcripts_bucket}/transcripts" --size-only --only-show-errors --region "${region}"
+version=$(aws secretsmanager describe-secret --region "${region}" --secret-id "${db_secret_arn}" \
+  --query 'VersionIdsToStages | keys(@) | sort(@) | join(`,`, @)' --output text)
+[ "$version" = "$(cat /run/shira/db-secret-version 2>/dev/null)" ] || changed=1
+if [ "$changed" = 1 ] && systemctl is-active --quiet shira-dispatcher; then
+  systemctl restart --no-block shira-dispatcher
+fi
+SCRIPT
+chmod 0755 /usr/local/bin/shira-sync
+
+# --- Services ---------------------------------------------------------------------------
+cat > /etc/systemd/system/shira-egress.service <<'UNIT'
+[Unit]
+Description=Shira egress proxy
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStartPre=-/usr/bin/docker rm --force shira-egress
+ExecStartPre=/usr/bin/docker create --name shira-egress --env-file /etc/shira/egress.env --publish 127.0.0.1:8080:8080 shira-egress-proxy
+ExecStartPre=/usr/bin/docker network connect shira-sandbox shira-egress
+ExecStart=/usr/bin/docker start --attach shira-egress
+ExecStop=/usr/bin/docker stop shira-egress
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/shira/egress.log
+StandardError=append:/var/log/shira/egress.log
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > /etc/systemd/system/shira-dispatcher.service <<'UNIT'
+[Unit]
+Description=Shira dispatcher
+After=shira-egress.service network-online.target
+Wants=network-online.target
+Requires=shira-egress.service
+
+[Service]
+User=shira
+ExecStartPre=+/usr/local/bin/shira-render-env
+ExecStart=/usr/local/bin/shira-dispatcher
+# SIGTERM lets the current task finish; SIGKILL only after the task time limit.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=${stop_timeout_sec}
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/shira/dispatcher.log
+StandardError=append:/var/log/shira/dispatcher.log
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > /etc/systemd/system/shira-sync.service <<'UNIT'
+[Unit]
+Description=Shira config sync and transcript upload
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/shira-sync
+UNIT
+
+cat > /etc/systemd/system/shira-sync.timer <<'UNIT'
+[Unit]
+Description=Run shira-sync every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl daemon-reload
+/usr/local/bin/shira-sync || true # first config pull; an empty bucket is fine
+systemctl enable --now shira-egress.service shira-dispatcher.service shira-sync.timer
+echo "shira bootstrap complete"

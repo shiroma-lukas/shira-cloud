@@ -1,0 +1,5 @@
+cells = {
+  internal = {
+    shira_version = "main"
+  }
+}

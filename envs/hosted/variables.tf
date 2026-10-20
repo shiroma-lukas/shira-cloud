@@ -1,0 +1,11 @@
+variable "cells" {
+  description = "One entry per customer, keyed by a short slug (becomes shira-<slug>)."
+  type = map(object({
+    shira_version     = string
+    db_instance_class = optional(string, "db.t4g.medium")
+    db_multi_az       = optional(bool, false)
+    fleet_min_size    = optional(number, 1)
+    fleet_max_size    = optional(number, 3)
+  }))
+  default = {}
+}

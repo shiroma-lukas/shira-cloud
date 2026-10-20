@@ -1,0 +1,163 @@
+data "aws_region" "current" {}
+
+# Ubuntu 24.04 LTS, resolved at plan time. gVisor publishes Debian/Ubuntu packages.
+data "aws_ssm_parameter" "ubuntu" {
+  name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
+}
+
+# No inbound rules at all: hosts are reached through SSM, never SSH.
+resource "aws_security_group" "fleet" {
+  name        = "${var.name}-fleet"
+  description = "Sandbox hosts for cell ${var.name}: outbound only"
+  vpc_id      = var.vpc_id
+}
+
+resource "aws_vpc_security_group_egress_rule" "all" {
+  security_group_id = aws_security_group.fleet.id
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+resource "aws_iam_role" "fleet" {
+  name = "${var.name}-fleet"
+  assume_role_policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = [{ Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" }, Action = "sts:AssumeRole" }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "managed" {
+  for_each = toset([
+    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+    "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy",
+  ])
+  role       = aws_iam_role.fleet.name
+  policy_arn = each.value
+}
+
+resource "aws_iam_role_policy" "fleet" {
+  role = aws_iam_role.fleet.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ReadCellSecrets"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+        Resource = [var.app_secret_arn, var.db_secret_arn]
+      },
+      {
+        Sid      = "ListBuckets"
+        Effect   = "Allow"
+        Action   = "s3:ListBucket"
+        Resource = ["arn:aws:s3:::${var.config_bucket}", "arn:aws:s3:::${var.transcripts_bucket}"]
+      },
+      {
+        Sid      = "ReadConfig"
+        Effect   = "Allow"
+        Action   = "s3:GetObject"
+        Resource = "arn:aws:s3:::${var.config_bucket}/*"
+      },
+      {
+        Sid      = "WriteTranscripts"
+        Effect   = "Allow"
+        Action   = "s3:PutObject"
+        Resource = "arn:aws:s3:::${var.transcripts_bucket}/transcripts/*"
+      },
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "fleet" {
+  name = "${var.name}-fleet"
+  role = aws_iam_role.fleet.name
+}
+
+resource "aws_launch_template" "fleet" {
+  name_prefix   = "${var.name}-fleet-"
+  image_id      = data.aws_ssm_parameter.ubuntu.insecure_value
+  instance_type = var.instance_type
+
+  iam_instance_profile {
+    arn = aws_iam_instance_profile.fleet.arn
+  }
+
+  vpc_security_group_ids = [aws_security_group.fleet.id]
+
+  # IMDSv2 only, with a hop limit of 1: processes in containers are one hop further
+  # away and can't fetch the host's credentials. The egress proxy also refuses
+  # link-local addresses, so this is defense in depth.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+
+  block_device_mappings {
+    device_name = "/dev/sda1"
+    ebs {
+      volume_size           = var.root_volume_gb
+      volume_type           = "gp3"
+      encrypted             = true
+      delete_on_termination = true
+    }
+  }
+
+  monitoring {
+    enabled = true
+  }
+
+  user_data = base64encode(templatefile("${path.module}/bootstrap.sh.tftpl", {
+    region              = data.aws_region.current.region
+    shira_repo_url      = var.shira_repo_url
+    shira_version       = var.shira_version
+    app_secret_arn      = var.app_secret_arn
+    db_secret_arn       = var.db_secret_arn
+    db_address          = var.db_address
+    db_port             = var.db_port
+    config_bucket       = var.config_bucket
+    transcripts_bucket  = var.transcripts_bucket
+    log_group_dispatch  = var.log_groups["dispatcher"]
+    log_group_egress    = var.log_groups["egress"]
+    log_group_bootstrap = var.log_groups["bootstrap"]
+    stop_timeout_sec    = var.max_task_minutes * 60 + 300
+  }))
+
+  tag_specifications {
+    resource_type = "instance"
+    tags          = { Name = "${var.name}-fleet", "shira:cell" = var.name }
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags          = { Name = "${var.name}-fleet", "shira:cell" = var.name }
+  }
+}
+
+resource "aws_autoscaling_group" "fleet" {
+  name                = "${var.name}-fleet"
+  vpc_zone_identifier = var.subnet_ids
+  min_size            = var.min_size
+  max_size            = var.max_size
+  health_check_type   = "EC2"
+
+  launch_template {
+    id      = aws_launch_template.fleet.id
+    version = aws_launch_template.fleet.latest_version
+  }
+
+  # Rolling replacement when the launch template changes (new shira_version, AMI, size).
+  # A replaced host's running task loses its lease and is retried on another host.
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 50
+    }
+  }
+
+  tag {
+    key                 = "shira:cell"
+    value               = var.name
+    propagate_at_launch = true
+  }
+}

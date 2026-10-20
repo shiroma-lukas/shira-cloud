@@ -1,0 +1,23 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+      - run: terraform fmt -check -recursive -diff
+      - name: validate
+        run: |
+          for env in envs/*/; do
+            echo "::group::$env"
+            terraform -chdir="$env" init -backend=false -input=false
+            terraform -chdir="$env" validate
+            echo "::endgroup::"
+          done
