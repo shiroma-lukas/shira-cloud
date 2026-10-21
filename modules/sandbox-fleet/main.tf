@@ -1,6 +1,11 @@
 data "aws_region" "current" {}
 
+data "aws_caller_identity" "current" {}
+
 locals {
+  # Named here, not read from the group: the launch template (inside the group) needs it.
+  asg_name       = "${var.name}-fleet"
+  drain_hook     = "drain"
   ubuntu_arch    = var.architecture == "arm64" ? "arm64" : "amd64"
   instance_types = distinct(concat([var.instance_type], var.spot ? var.spot_instance_types : []))
 }
@@ -68,6 +73,12 @@ resource "aws_iam_role_policy" "fleet" {
         Effect   = "Allow"
         Action   = "s3:GetObject"
         Resource = "arn:aws:s3:::${var.config_bucket}/*"
+      },
+      {
+        Sid      = "DrainOnScaleIn"
+        Effect   = "Allow"
+        Action   = ["autoscaling:CompleteLifecycleAction", "autoscaling:RecordLifecycleActionHeartbeat"]
+        Resource = "arn:aws:autoscaling:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:autoScalingGroup:*:autoScalingGroupName/${local.asg_name}"
       },
       {
         # The dispatcher writes each run's transcript once and never reads it back.
@@ -143,6 +154,8 @@ resource "aws_launch_template" "fleet" {
     log_group_egress    = var.log_groups["egress"]
     log_group_bootstrap = var.log_groups["bootstrap"]
     stop_timeout_sec    = var.max_task_minutes * 60 + 300
+    asg_name            = local.asg_name
+    drain_hook          = local.drain_hook
   }))
 
   tag_specifications {
@@ -157,7 +170,7 @@ resource "aws_launch_template" "fleet" {
 }
 
 resource "aws_autoscaling_group" "fleet" {
-  name                = "${var.name}-fleet"
+  name                = local.asg_name
   vpc_zone_identifier = var.subnet_ids
   min_size            = var.min_size
   max_size            = var.max_size
@@ -196,8 +209,22 @@ resource "aws_autoscaling_group" "fleet" {
     }
   }
 
+  # Scale-in, instance refresh, and Spot rebalancing hold a leaving host in Terminating:Wait.
+  # The host sees it in instance metadata, stops its dispatcher (SIGTERM: the current task
+  # finishes), and completes the action itself (shira-drain in the bootstrap script). It
+  # sends heartbeats while it waits, so a host that dies mid-drain is released after
+  # heartbeat_timeout. A Spot interruption itself gives two minutes and can't wait: that
+  # task is retried elsewhere.
+  initial_lifecycle_hook {
+    name                 = local.drain_hook
+    lifecycle_transition = "autoscaling:EC2_INSTANCE_TERMINATING"
+    heartbeat_timeout    = 900
+    default_result       = "CONTINUE"
+  }
+
   # Rolling replacement when the launch template changes (new shira_version, AMI, size).
-  # A replaced host's running task loses its lease and is retried on another host.
+  # Replaced hosts drain through the lifecycle hook above, so an upgrade waits for running
+  # tasks instead of retrying them.
   instance_refresh {
     strategy = "Rolling"
     preferences {
