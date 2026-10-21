@@ -2,7 +2,7 @@
 # Cells share the network and nothing else: each has its own database, fleet, buckets,
 # secrets, and IAM role.
 terraform {
-  required_version = ">= 1.10"
+  required_version = ">= 1.11"
   required_providers {
     aws = { source = "hashicorp/aws", version = "~> 6.0" }
   }
@@ -46,4 +46,5 @@ module "cell" {
   fleet_min_size            = each.value.fleet_min_size
   fleet_max_size            = each.value.fleet_max_size
   deletion_protection       = each.value.deletion_protection
+  db_app_password_version   = each.value.db_app_password_version
 }

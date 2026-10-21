@@ -72,7 +72,13 @@ variable "app_secret_arn" {
 }
 
 variable "db_secret_arn" {
-  type = string
+  description = "RDS master credentials, used only to migrate and to manage the app user."
+  type        = string
+}
+
+variable "db_app_secret_arn" {
+  description = "The dispatchers' least-privilege database user ({username, password})."
+  type        = string
 }
 
 variable "db_address" {
