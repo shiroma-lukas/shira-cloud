@@ -63,7 +63,7 @@ docker network inspect shira-sandbox >/dev/null 2>&1 || docker network create --
 
 curl -fsSL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o /etc/ssl/certs/rds-global-bundle.pem
 
-install -d -o shira -g shira -m 0750 /etc/shira /etc/shira/config /etc/shira/context /var/lib/shira /var/lib/shira/transcripts
+install -d -o shira -g shira -m 0750 /etc/shira /etc/shira/config /etc/shira/context /var/lib/shira
 
 # The egress admin token is local to this host: only its proxy and dispatcher share it.
 umask 077
@@ -107,7 +107,10 @@ SHIRA_GITHUB_PRIVATE_KEY_PATH='/run/shira/github-app.pem'
 ANTHROPIC_API_KEY='$(jq -r .anthropic_api_key <<<"$app")'
 SHIRA_CONFIG='/etc/shira/config'
 SHIRA_CONTEXT_DIR='/etc/shira/context'
-SHIRA_TRANSCRIPTS_DIR='/var/lib/shira/transcripts'
+# Transcripts go straight to S3, redacted, and the database records their s3:// URIs.
+# The SDK takes credentials from the instance role and the region from AWS_REGION.
+SHIRA_TRANSCRIPTS_URI='s3://${transcripts_bucket}/transcripts'
+AWS_REGION='${region}'
 ENV
 jq -r .github_private_key <<<"$app" > /run/shira/github-app.pem
 chown shira:shira /run/shira/env /run/shira/github-app.pem
@@ -143,7 +146,7 @@ exec sudo -u shira bash -c 'set -a; . /run/shira/env; set +a; exec node --import
 SCRIPT
 chmod 0755 /usr/local/bin/shira
 
-# Every 5 minutes: pull config and context, upload transcripts, and restart the dispatcher
+# Every 5 minutes: pull config and context, and restart the dispatcher
 # (gracefully, after its current task) when config or the app user's password changed.
 # The RDS master password rotates on its own schedule; it is read fresh at each start and
 # needs no restart.
@@ -155,7 +158,6 @@ for dir in config context; do
   out=$(aws s3 sync "s3://${config_bucket}/$dir" "/etc/shira/$dir" --delete --no-progress --region "${region}")
   [ -z "$out" ] || changed=1
 done
-aws s3 sync /var/lib/shira/transcripts "s3://${transcripts_bucket}/transcripts" --size-only --only-show-errors --region "${region}"
 version=$(aws secretsmanager describe-secret --region "${region}" --secret-id "${db_app_secret_arn}" \
   --query 'VersionIdsToStages | keys(@) | sort(@) | join(`,`, @)' --output text)
 [ "$version" = "$(cat /run/shira/db-secret-version 2>/dev/null)" ] || changed=1

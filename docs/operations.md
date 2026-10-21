@@ -86,6 +86,11 @@ sudo shira answer <task-id> --text "..."
 sudo shira kill on        # pause every agent in the cell
 ```
 
+Run transcripts are redacted and written by the dispatcher straight to
+`s3://<transcripts_bucket>/transcripts/<task>/<run>.jsonl`. Each run's URI is recorded in
+`runs.transcript_uri`, and the bucket's lifecycle rule expires them after `transcript_retention_days`. Hosts can
+write transcripts but not read them back; read them with your operator credentials.
+
 Logs: CloudWatch `/shira/<cell>/dispatcher`, `/egress`, and `/bootstrap`. The
 `Shira/<cell>/EgressDenied` metric counts blocked connection attempts.
 
@@ -121,8 +126,6 @@ Every option below is opt-in per environment or cell; module defaults stay on th
 
 ## Known gaps (M1)
 
-- Transcripts are uploaded to S3 by the sync timer, but the URIs recorded in the database
-  still point at the host's disk. An S3 transcript store in the core will fix this.
 - Scaling in doesn't drain a host: its running task is retried elsewhere. A lifecycle hook
   that waits for the dispatcher to stop will fix this.
 - No inbound endpoints yet: Slack intake (M2) will add a load balancer.
