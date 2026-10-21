@@ -58,10 +58,10 @@ resource "aws_iam_role_policy" "fleet" {
         Resource = [var.app_secret_arn, var.db_secret_arn, var.db_app_secret_arn]
       },
       {
-        Sid      = "ListBuckets"
+        Sid      = "ListConfig"
         Effect   = "Allow"
         Action   = "s3:ListBucket"
-        Resource = ["arn:aws:s3:::${var.config_bucket}", "arn:aws:s3:::${var.transcripts_bucket}"]
+        Resource = "arn:aws:s3:::${var.config_bucket}"
       },
       {
         Sid      = "ReadConfig"
@@ -70,6 +70,7 @@ resource "aws_iam_role_policy" "fleet" {
         Resource = "arn:aws:s3:::${var.config_bucket}/*"
       },
       {
+        # The dispatcher writes each run's transcript once and never reads it back.
         Sid      = "WriteTranscripts"
         Effect   = "Allow"
         Action   = "s3:PutObject"
