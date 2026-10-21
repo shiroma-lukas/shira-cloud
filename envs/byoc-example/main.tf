@@ -2,7 +2,7 @@
 # leaves the customer's account. Shira Cloud applies this with the customer's operator
 # role (modules/byoc-access), which the customer created and can revoke.
 terraform {
-  required_version = ">= 1.10"
+  required_version = ">= 1.11"
   required_providers {
     aws = { source = "hashicorp/aws", version = "~> 6.0" }
   }

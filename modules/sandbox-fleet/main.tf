@@ -55,7 +55,7 @@ resource "aws_iam_role_policy" "fleet" {
         Sid      = "ReadCellSecrets"
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-        Resource = [var.app_secret_arn, var.db_secret_arn]
+        Resource = [var.app_secret_arn, var.db_secret_arn, var.db_app_secret_arn]
       },
       {
         Sid      = "ListBuckets"
@@ -133,6 +133,7 @@ resource "aws_launch_template" "fleet" {
     shira_version       = var.shira_version
     app_secret_arn      = var.app_secret_arn
     db_secret_arn       = var.db_secret_arn
+    db_app_secret_arn   = var.db_app_secret_arn
     db_address          = var.db_address
     db_port             = var.db_port
     config_bucket       = var.config_bucket

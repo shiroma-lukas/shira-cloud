@@ -37,6 +37,12 @@ variable "db_multi_az" {
   default     = false
 }
 
+variable "db_app_password_version" {
+  description = "Bump to rotate the dispatchers' database password; hosts pick it up within 5 minutes."
+  type        = number
+  default     = 1
+}
+
 variable "deletion_protection" {
   description = "Protect the database and keep a final snapshot. Turn off only for throwaway cells."
   type        = bool

@@ -15,6 +15,30 @@ resource "aws_secretsmanager_secret" "app" {
   recovery_window_in_days = var.deletion_protection ? 30 : 0
 }
 
+# Dispatchers connect as a least-privilege user in shira's shira_app role (shira #7), not as
+# the RDS master. Its password is generated here but written write-only, so it never enters
+# state; hosts set it on the database (`shira app-user`) at every dispatcher start.
+# Bump db_app_password_version to rotate it.
+ephemeral "aws_secretsmanager_random_password" "db_app" {
+  password_length     = 40
+  exclude_punctuation = true
+}
+
+resource "aws_secretsmanager_secret" "db_app" {
+  name                    = "shira/${var.name}/db-app"
+  description             = "Least-privilege database user for the dispatchers of cell ${var.name}"
+  recovery_window_in_days = var.deletion_protection ? 30 : 0
+}
+
+resource "aws_secretsmanager_secret_version" "db_app" {
+  secret_id = aws_secretsmanager_secret.db_app.id
+  secret_string_wo = jsonencode({
+    username = "shira_dispatcher"
+    password = ephemeral.aws_secretsmanager_random_password.db_app.random_password
+  })
+  secret_string_wo_version = var.db_app_password_version
+}
+
 # --- Database --------------------------------------------------------------------------
 resource "aws_db_subnet_group" "this" {
   name       = var.name
@@ -181,6 +205,7 @@ module "fleet" {
   shira_version       = var.shira_version
   app_secret_arn      = aws_secretsmanager_secret.app.arn
   db_secret_arn       = aws_db_instance.this.master_user_secret[0].secret_arn
+  db_app_secret_arn   = aws_secretsmanager_secret_version.db_app.secret_id
   db_address          = aws_db_instance.this.address
   db_port             = aws_db_instance.this.port
   config_bucket       = aws_s3_bucket.config.bucket

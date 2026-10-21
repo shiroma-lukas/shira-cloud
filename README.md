@@ -47,4 +47,5 @@ buckets, a secret, IAM, and logs. Cells never share data.
 
 Operating it: [docs/operations.md](docs/operations.md).
 
-The code uses only features shared by Terraform ≥ 1.10 and OpenTofu, so either works.
+The code uses only features shared by Terraform ≥ 1.11 and OpenTofu ≥ 1.11 (ephemeral resources and
+write-only arguments, which keep generated passwords out of state), so either works.

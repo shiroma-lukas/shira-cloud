@@ -20,6 +20,7 @@ variable "cells" {
     fleet_min_size            = optional(number, 1)
     fleet_max_size            = optional(number, 3)
     deletion_protection       = optional(bool, true)
+    db_app_password_version   = optional(number, 1)
   }))
   default = {}
 }

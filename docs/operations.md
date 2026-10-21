@@ -47,6 +47,32 @@ aws s3 sync ./context s3://<config_bucket>/context --delete   # roles/worker.md,
 aws autoscaling start-instance-refresh --region sa-east-1 --auto-scaling-group-name shira-<slug>-fleet
 ```
 
+## Database users
+
+A cell's database has two users:
+
+| User | Secret | Used for |
+|---|---|---|
+| `shira` (RDS master) | `db_secret_arn` output, managed and rotated by RDS | Migrations and managing the app user, in `shira-render-env` only |
+| `shira_dispatcher` | `shira/<cell>/db-app` | Dispatchers and the host `shira` CLI. Member of `shira_app`: no deletes, no schema changes, insert-only audit log |
+
+Terraform generates the app user's password and writes it to the secret write-only, so
+it never appears in state. Before each dispatcher start, the host runs `shira migrate`
+and `shira app-user` with the master credentials, then starts the dispatcher with only
+the app user's `DATABASE_URL`. `shira_version` must include shira PR #20, which lets
+`app-user` run as the RDS master. That master is not a full superuser.
+
+**Rotating the app password:** bump `db_app_password_version` for the cell and apply.
+Within 5 minutes each host's sync timer sees the new secret version and restarts its
+dispatcher after the current task, which resets the password on the database. Until a
+host restarts, its open connections keep working, but new ones fail and are retried.
+
+The RDS master password rotates on RDS's own schedule. Hosts read it fresh at each
+dispatcher start, so its rotation needs no restart.
+
+Host operators use the app user too, so `sudo shira` can't change the schema or disable a
+repo. For those, use the master credentials from the secret, through SSM.
+
 ## Day to day
 
 Open a shell on any host of the cell and use the `shira` CLI:
@@ -97,8 +123,6 @@ Every option below is opt-in per environment or cell; module defaults stay on th
 
 - Transcripts are uploaded to S3 by the sync timer, but the URIs recorded in the database
   still point at the host's disk. An S3 transcript store in the core will fix this.
-- Dispatchers connect as the RDS master user. A least-privilege application role comes
-  with the next migration round.
 - Scaling in doesn't drain a host: its running task is retried elsewhere. A lifecycle hook
   that waits for the dispatcher to stop will fix this.
 - No inbound endpoints yet: Slack intake (M2) will add a load balancer.
