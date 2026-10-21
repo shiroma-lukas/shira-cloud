@@ -97,8 +97,22 @@ Logs: CloudWatch `/shira/<cell>/dispatcher`, `/egress`, and `/bootstrap`. The
 ## Upgrading Shira
 
 Change `shira_version` for the cell and apply. The launch template changes and the Auto
-Scaling group replaces hosts gradually. A task running on a replaced host loses its lease
-and is retried on another host.
+Scaling group replaces hosts gradually, half the fleet at a time. Each replaced host
+drains first (below), so an upgrade can take up to `max_task_minutes` per batch.
+
+## Scale-in and draining
+
+When the Auto Scaling group removes a host (scale-in, instance refresh, Spot capacity
+rebalancing), a lifecycle hook holds it in `Terminating:Wait`. The host's `shira-drain`
+service sees this in instance metadata within 15 seconds. It stops the sync timer and
+stops the dispatcher, which claims nothing new and finishes its current task (up to
+`max_task_minutes`). Then it completes the lifecycle action and the host terminates. The
+log lines start with `scale-in:` in `/shira/<cell>/dispatcher`.
+
+While it waits, the host sends a heartbeat every 5 minutes. If it dies mid-drain, the
+group lets the termination proceed 15 minutes after the last heartbeat, and the task's
+lease expires and it is retried elsewhere. A Spot interruption gives only two minutes'
+notice, so the task on an interrupted host is retried rather than drained.
 
 ## BYOC
 
@@ -126,6 +140,4 @@ Every option below is opt-in per environment or cell; module defaults stay on th
 
 ## Known gaps (M1)
 
-- Scaling in doesn't drain a host: its running task is retried elsewhere. A lifecycle hook
-  that waits for the dispatcher to stop will fix this.
 - No inbound endpoints yet: Slack intake (M2) will add a load balancer.

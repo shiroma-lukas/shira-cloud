@@ -167,6 +167,39 @@ fi
 SCRIPT
 chmod 0755 /usr/local/bin/shira-sync
 
+# Drain on scale-in: wait until the Auto Scaling group moves this host to Terminating:Wait,
+# then stop the dispatcher (its current task finishes) and let the termination proceed.
+cat > /usr/local/bin/shira-drain <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+imds() {
+  local token
+  token=$(curl -sf -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
+  curl -sf -H "X-aws-ec2-metadata-token: $token" "http://169.254.169.254/latest/meta-data/$1"
+}
+while [ "$(imds autoscaling/target-lifecycle-state || true)" != "Terminated" ]; do
+  sleep 15
+done
+instance=$(imds instance-id)
+action() {
+  local verb=$1
+  shift
+  aws autoscaling "$verb" --region "${region}" --auto-scaling-group-name "${asg_name}" \
+    --lifecycle-hook-name "${drain_hook}" --instance-id "$instance" "$@"
+}
+echo "$(date -u +%FT%TZ) scale-in: stopping the dispatcher after its current task"
+# The sync timer would restart a stopped dispatcher on a config change.
+systemctl stop shira-sync.timer
+( while sleep 300; do action record-lifecycle-action-heartbeat || true; done ) &
+heartbeat=$!
+systemctl stop shira-dispatcher.service
+kill "$heartbeat"
+wait "$heartbeat" 2>/dev/null || true
+echo "$(date -u +%FT%TZ) scale-in: dispatcher stopped, completing the lifecycle action"
+action complete-lifecycle-action --lifecycle-action-result CONTINUE
+SCRIPT
+chmod 0755 /usr/local/bin/shira-drain
+
 # --- Services ---------------------------------------------------------------------------
 cat > /etc/systemd/system/shira-egress.service <<'UNIT'
 [Unit]
@@ -213,6 +246,22 @@ StandardError=append:/var/log/shira/dispatcher.log
 WantedBy=multi-user.target
 UNIT
 
+cat > /etc/systemd/system/shira-drain.service <<'UNIT'
+[Unit]
+Description=Shira drain on scale-in
+After=shira-dispatcher.service
+
+[Service]
+ExecStart=/usr/local/bin/shira-drain
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/var/log/shira/dispatcher.log
+StandardError=append:/var/log/shira/dispatcher.log
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 cat > /etc/systemd/system/shira-sync.service <<'UNIT'
 [Unit]
 Description=Shira config sync and transcript upload
@@ -236,5 +285,5 @@ UNIT
 
 systemctl daemon-reload
 /usr/local/bin/shira-sync || true # first config pull; an empty bucket is fine
-systemctl enable --now shira-egress.service shira-dispatcher.service shira-sync.timer
+systemctl enable --now shira-egress.service shira-dispatcher.service shira-sync.timer shira-drain.service
 echo "shira bootstrap complete"
